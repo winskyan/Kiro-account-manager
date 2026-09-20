@@ -1,6 +1,6 @@
 import { useAccountsStore } from '@/store/accounts'
 import { Card, CardContent, CardHeader, CardTitle, Button } from '../ui'
-import { Eye, EyeOff, RefreshCw, Clock, Trash2, Download, Upload, Globe, Repeat, Palette, Moon, Sun, Fingerprint, Info, ChevronDown, ChevronUp, Settings, Database, Layers, UserX, Monitor } from 'lucide-react'
+import { Eye, EyeOff, RefreshCw, Clock, Trash2, Download, Upload, Globe, Repeat, Palette, Moon, Sun, Fingerprint, Info, ChevronDown, ChevronUp, Settings, Database, Layers, UserX, Monitor, Save, Wifi } from 'lucide-react'
 import { useState, useEffect } from 'react'
 import { ExportDialog } from '../accounts/ExportDialog'
 import { useTranslation } from '@/hooks/useTranslation'
@@ -169,6 +169,7 @@ export function SettingsPage() {
     proactiveRenewalEnabled,
     proactiveRenewalLeadMinutes,
     setProactiveRenewalEnabled,
+    loadProactiveRenewalEnabled,
     setAutoRefresh,
     setAutoRefreshConcurrency,
     setAutoRefreshSyncInfo,
@@ -203,6 +204,12 @@ export function SettingsPage() {
   const [tempProxyUrl, setTempProxyUrl] = useState(proxyUrl)
   const [themeExpanded, setThemeExpanded] = useState(false)
   const [isManualRefreshing, setIsManualRefreshing] = useState(false)
+  const [remoteSyncEnabled, setRemoteSyncEnabled] = useState(false)
+  const [remoteSyncTargets, setRemoteSyncTargets] = useState('')
+  const [remoteSyncTimeout, setRemoteSyncTimeout] = useState(8)
+  const [remoteSyncLoading, setRemoteSyncLoading] = useState(true)
+  const [remoteSyncBusy, setRemoteSyncBusy] = useState(false)
+  const [remoteSyncStatus, setRemoteSyncStatus] = useState('')
   
   // 托盘设置状态
   const [traySettings, setTraySettings] = useState({
@@ -233,6 +240,118 @@ export function SettingsPage() {
     }
     loadShortcut()
   }, [])
+
+  useEffect(() => {
+    let active = true
+    void window.api.getRemoteKiroSyncSettings().then((result) => {
+      if (!active) return
+      if (result.success && result.settings) {
+        setRemoteSyncEnabled(result.settings.enabled)
+        setRemoteSyncTargets(result.settings.targets.join('\n'))
+        setRemoteSyncTimeout(result.settings.connectTimeoutSeconds)
+      } else if (result.error) {
+        setRemoteSyncStatus(result.error)
+      }
+    }).catch((error) => {
+      if (active) setRemoteSyncStatus(String(error))
+    }).finally(() => {
+      if (active) setRemoteSyncLoading(false)
+    })
+
+    const unsubscribe = window.api.onRemoteKiroSyncStatus((result) => {
+      if (!active) return
+      const succeeded = result.results.filter((item) => item.success).length
+      setRemoteSyncStatus(
+        result.success
+          ? (isEn
+              ? `Synced ${succeeded}/${result.results.length} Remote SSH target(s)`
+              : `已同步 ${succeeded}/${result.results.length} 个 Remote SSH 主机`)
+          : result.reason || result.results.find((item) => !item.success)?.error ||
+              (isEn ? 'Remote SSH sync failed' : 'Remote SSH 同步失败')
+      )
+    })
+
+    return () => {
+      active = false
+      unsubscribe()
+    }
+  }, [isEn])
+
+  const parsedRemoteTargets = (): string[] => Array.from(new Set(
+    remoteSyncTargets.split(/[\s,]+/).map((target) => target.trim()).filter(Boolean)
+  ))
+
+  const formatRemoteResults = (
+    results: Array<{ target: string; success: boolean; error?: string }>,
+    fallback: string
+  ): string => {
+    if (results.length === 0) return fallback
+    return results.map((result) =>
+      result.success ? `${result.target}: OK` : `${result.target}: ${result.error || 'Failed'}`
+    ).join(' | ')
+  }
+
+  const handleRemoteSyncTest = async (): Promise<void> => {
+    setRemoteSyncBusy(true)
+    setRemoteSyncStatus(isEn ? 'Testing SSH connections...' : '正在测试 SSH 连接...')
+    try {
+      const result = await window.api.testRemoteKiroSync(parsedRemoteTargets(), remoteSyncTimeout)
+      setRemoteSyncStatus(formatRemoteResults(
+        result.results,
+        result.error || (isEn ? 'Connection test failed' : '连接测试失败')
+      ))
+    } catch (error) {
+      setRemoteSyncStatus(String(error))
+    } finally {
+      setRemoteSyncBusy(false)
+    }
+  }
+
+  const handleRemoteSyncSave = async (): Promise<void> => {
+    setRemoteSyncBusy(true)
+    setRemoteSyncStatus(isEn ? 'Saving and syncing...' : '正在保存并同步...')
+    try {
+      const result = await window.api.setRemoteKiroSyncSettings({
+        enabled: remoteSyncEnabled,
+        targets: parsedRemoteTargets(),
+        connectTimeoutSeconds: remoteSyncTimeout
+      })
+      if (!result.success) {
+        setRemoteSyncStatus(result.error || (isEn ? 'Failed to save settings' : '保存设置失败'))
+        return
+      }
+      await loadProactiveRenewalEnabled()
+      const syncResult = result.syncResult
+      setRemoteSyncStatus(
+        syncResult
+          ? formatRemoteResults(
+              syncResult.results,
+              syncResult.reason || (isEn ? 'Settings saved' : '设置已保存')
+            )
+          : (isEn ? 'Settings saved' : '设置已保存')
+      )
+    } catch (error) {
+      setRemoteSyncStatus(String(error))
+    } finally {
+      setRemoteSyncBusy(false)
+    }
+  }
+
+  const handleRemoteSyncNow = async (): Promise<void> => {
+    setRemoteSyncBusy(true)
+    setRemoteSyncStatus(isEn ? 'Syncing current credentials...' : '正在同步当前凭证...')
+    try {
+      const result = await window.api.syncRemoteKiroNow()
+      setRemoteSyncStatus(formatRemoteResults(
+        result.results,
+        result.reason || (isEn ? 'Remote SSH sync failed' : 'Remote SSH 同步失败')
+      ))
+    } catch (error) {
+      setRemoteSyncStatus(String(error))
+    } finally {
+      setRemoteSyncBusy(false)
+    }
+  }
 
   // 保存快捷键设置
   const handleShortcutChange = async (shortcut: string) => {
@@ -769,6 +888,111 @@ export function SettingsPage() {
               </div>
             </>
           )}
+        </CardContent>
+      </Card>
+
+      {/* Remote SSH Token 同步 */}
+      <Card className="hover-lift">
+        <CardHeader className="pb-2">
+          <CardTitle className="text-base flex items-center gap-3">
+            <div className="p-2 rounded-lg bg-primary/10">
+              <Monitor className="h-4 w-4 text-primary" />
+            </div>
+            {isEn ? 'Remote SSH Token Sync' : 'Remote SSH Token 同步'}
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <p className="font-medium">{isEn ? 'Automatic Remote Sync' : '自动同步远程 Kiro'}</p>
+              <p className="text-sm text-muted-foreground">
+                {isEn
+                  ? 'Keep the active Kiro token and client registration synchronized over SSH.'
+                  : '通过 SSH 同步当前 Kiro Token 和客户端注册信息。'}
+              </p>
+            </div>
+            <Button
+              variant={remoteSyncEnabled ? 'default' : 'outline'}
+              size="sm"
+              disabled={remoteSyncLoading || remoteSyncBusy}
+              onClick={() => setRemoteSyncEnabled(!remoteSyncEnabled)}
+            >
+              {remoteSyncEnabled ? (isEn ? 'On' : '已开启') : (isEn ? 'Off' : '已关闭')}
+            </Button>
+          </div>
+
+          <div className="space-y-2 pt-2 border-t">
+            <label className="text-sm font-medium" htmlFor="remote-kiro-sync-targets">
+              {isEn ? 'SSH targets' : 'SSH 主机'}
+            </label>
+            <textarea
+              id="remote-kiro-sync-targets"
+              className="w-full min-h-24 px-3 py-2 rounded-md border bg-background text-sm font-mono resize-y focus:outline-none focus:ring-1 focus:ring-primary focus:border-primary"
+              value={remoteSyncTargets}
+              disabled={remoteSyncLoading || remoteSyncBusy}
+              onChange={(event) => setRemoteSyncTargets(event.target.value)}
+              placeholder={isEn ? 'user@host\nssh-config-alias' : 'user@host\nSSH 配置中的 Host 别名'}
+            />
+            <p className="text-xs text-muted-foreground">
+              {isEn
+                ? 'One target per line. Passwordless SSH via a key or ssh-agent is required.'
+                : '每行一个主机；必须已配置 SSH 密钥或 ssh-agent 免交互登录。'}
+            </p>
+          </div>
+
+          <div className="flex items-center justify-between gap-4 pt-2 border-t">
+            <div>
+              <p className="font-medium">{isEn ? 'Connection timeout' : '连接超时'}</p>
+              <p className="text-sm text-muted-foreground">
+                {isEn ? 'Maximum wait for each SSH target' : '每个 SSH 主机的最大等待时间'}
+              </p>
+            </div>
+            <select
+              className="w-[120px] h-9 px-3 rounded-lg border bg-background text-sm focus:outline-none focus:ring-1 focus:ring-primary focus:border-primary"
+              value={remoteSyncTimeout}
+              disabled={remoteSyncLoading || remoteSyncBusy}
+              onChange={(event) => setRemoteSyncTimeout(Number(event.target.value))}
+            >
+              <option value="5">5s</option>
+              <option value="8">8s</option>
+              <option value="15">15s</option>
+              <option value="30">30s</option>
+            </select>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2 pt-2 border-t">
+            <Button variant="default" size="sm" disabled={remoteSyncLoading || remoteSyncBusy} onClick={handleRemoteSyncSave}>
+              <Save className="h-4 w-4 mr-2" />
+              {isEn ? 'Save & Sync' : '保存并同步'}
+            </Button>
+            <Button variant="outline" size="sm" disabled={remoteSyncLoading || remoteSyncBusy} onClick={handleRemoteSyncTest}>
+              <Wifi className="h-4 w-4 mr-2" />
+              {isEn ? 'Test' : '测试连接'}
+            </Button>
+            <Button variant="outline" size="sm" disabled={remoteSyncLoading || remoteSyncBusy || !remoteSyncEnabled} onClick={handleRemoteSyncNow}>
+              <RefreshCw className={`h-4 w-4 mr-2 ${remoteSyncBusy ? 'animate-spin' : ''}`} />
+              {isEn ? 'Sync Now' : '立即同步'}
+            </Button>
+          </div>
+
+          {remoteSyncStatus && (
+            <div className="text-xs text-muted-foreground bg-muted/50 rounded-lg p-3 break-words">
+              {remoteSyncStatus}
+            </div>
+          )}
+
+          <div className="text-xs text-muted-foreground bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900 rounded-lg p-3 space-y-1">
+            <p>
+              {isEn
+                ? 'Enabling this also enables proactive renewal so one manager owns token rotation for all synchronized IDEs.'
+                : '启用后会同时开启 IDE 主动续期，由本管理器统一负责所有已同步 IDE 的 Token 轮换。'}
+            </p>
+            <p>
+              {isEn
+                ? 'Remote Windows hosts are not supported yet; the remote host must provide a POSIX shell and base64 or OpenSSL.'
+                : '暂不支持 Windows 远程主机；远程端需提供 POSIX shell，以及 base64 或 OpenSSL。'}
+            </p>
+          </div>
         </CardContent>
       </Card>
 

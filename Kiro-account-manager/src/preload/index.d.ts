@@ -72,6 +72,25 @@ interface KiroIdeTokenChangedPayload {
   reason: string
 }
 
+interface RemoteKiroSyncSettings {
+  enabled: boolean
+  targets: string[]
+  connectTimeoutSeconds: number
+}
+
+interface RemoteKiroSyncTargetResult {
+  target: string
+  success: boolean
+  error?: string
+}
+
+interface RemoteKiroSyncResult {
+  success: boolean
+  skipped?: boolean
+  reason?: string
+  results: RemoteKiroSyncTargetResult[]
+}
+
 interface BonusData {
   code: string
   name: string
@@ -233,6 +252,26 @@ interface KiroApi {
     leadTimeMinutes?: number
     error?: string
   }>
+
+  getRemoteKiroSyncSettings: () => Promise<{
+    success: boolean
+    settings?: RemoteKiroSyncSettings
+    error?: string
+  }>
+  setRemoteKiroSyncSettings: (settings: RemoteKiroSyncSettings) => Promise<{
+    success: boolean
+    settings?: RemoteKiroSyncSettings
+    proactiveRenewalEnabled?: boolean
+    syncResult?: RemoteKiroSyncResult
+    error?: string
+  }>
+  testRemoteKiroSync: (targets: string[], connectTimeoutSeconds?: number) => Promise<{
+    success: boolean
+    results: RemoteKiroSyncTargetResult[]
+    error?: string
+  }>
+  syncRemoteKiroNow: () => Promise<RemoteKiroSyncResult>
+  onRemoteKiroSyncStatus: (callback: (data: RemoteKiroSyncResult & { reason: string }) => void) => () => void
 
   // 切换账号到 Kiro CLI - 写入凭证到 SQLite 数据库
   switchAccountCli: (credentials: {

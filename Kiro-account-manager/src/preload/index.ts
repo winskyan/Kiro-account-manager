@@ -165,6 +165,30 @@ const api = {
     return ipcRenderer.invoke('get-proactive-renewal-enabled')
   },
 
+  getRemoteKiroSyncSettings: (): Promise<unknown> => {
+    return ipcRenderer.invoke('remote-kiro-sync:get-settings')
+  },
+  setRemoteKiroSyncSettings: (settings: {
+    enabled: boolean
+    targets: string[]
+    connectTimeoutSeconds: number
+  }): Promise<unknown> => {
+    return ipcRenderer.invoke('remote-kiro-sync:set-settings', settings)
+  },
+  testRemoteKiroSync: (targets: string[], connectTimeoutSeconds?: number): Promise<unknown> => {
+    return ipcRenderer.invoke('remote-kiro-sync:test', targets, connectTimeoutSeconds)
+  },
+  syncRemoteKiroNow: (): Promise<unknown> => {
+    return ipcRenderer.invoke('remote-kiro-sync:sync-now')
+  },
+  onRemoteKiroSyncStatus: (callback: (data: unknown) => void): (() => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, data: unknown): void => callback(data)
+    ipcRenderer.on('remote-kiro-sync-status', handler)
+    return (): void => {
+      ipcRenderer.removeListener('remote-kiro-sync-status', handler)
+    }
+  },
+
   // 切换账号到 Kiro CLI - 写入凭证到 SQLite 数据库
   switchAccountCli: (credentials: {
     accessToken: string

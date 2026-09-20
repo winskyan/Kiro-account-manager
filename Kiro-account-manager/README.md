@@ -49,6 +49,12 @@
 - Edit MCP server configurations
 - Manage user rules (Steering files)
 
+### 🖥️ Remote SSH Token Sync
+- Automatically sync rotated tokens to one or more Kiro Remote SSH hosts
+- Sync both `kiro-auth-token.json` and the IdC client registration with `0600` permissions
+- Test connections, sync immediately, and inspect per-target failures
+- Send credentials only through SSH standard input, never command arguments or application logs
+
 ### 🌐 Multi-Language Support
 - Full English/Chinese bilingual interface
 - Auto-detect system language or manual selection
@@ -80,6 +86,17 @@
 - Unified task center (global progress panel)
 - One-click diagnostics panel (Network/Kiro/AWS/Email/Proxy connectivity)
 - Config import/export (with optional AES-GCM encryption)
+
+---
+
+## 🖥️ Remote SSH Token Sync
+
+1. Configure an SSH key or `ssh-agent` so `ssh user@host` works without an interactive password prompt.
+2. Open Settings → Remote SSH Token Sync and enter one `user@host` or `~/.ssh/config` Host alias per line.
+3. Test the connection, enable automatic sync, then select Save & Sync.
+4. Enabling remote sync also enables proactive IDE renewal so the manager owns token rotation and distributes each new token to every target.
+
+The remote host must provide a POSIX shell and either `base64` or OpenSSL. Windows remote hosts are not currently supported. The app never reads or stores SSH private keys or passwords.
 
 ---
 

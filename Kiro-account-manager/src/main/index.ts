@@ -25,6 +25,15 @@ import {
   resolveProfileArnForWrite,
   KIRO_AUTH_TOKEN_PATH
 } from './kiroAuthSync'
+import {
+  DEFAULT_REMOTE_KIRO_SYNC_SETTINGS,
+  normalizeRemoteKiroSyncSettings,
+  syncKiroAuthToRemotes,
+  testRemoteKiroTargets,
+  validateRemoteKiroTarget,
+  type RemoteKiroSyncResult,
+  type RemoteKiroSyncSettings
+} from './remoteKiroAuthSync'
 import { openaiToKiro } from './proxy/translator'
 import { getSystemProxy, safeCreateProxyAgent } from './proxy/systemProxy'
 import { proxyLogStore, interceptConsole } from './proxy/logger'
@@ -1406,6 +1415,8 @@ let store: {
   path: string
 } | null = null
 
+let remoteKiroSyncSettings: RemoteKiroSyncSettings = DEFAULT_REMOTE_KIRO_SYNC_SETTINGS
+
 // 最后保存的数据（用于崩溃恢复）
 let lastSavedData: unknown = null
 
@@ -1457,6 +1468,53 @@ async function initStore(): Promise<void> {
   } catch (e) {
     console.warn('[ProactiveRenewal] Failed to load setting:', e)
   }
+
+  try {
+    remoteKiroSyncSettings = normalizeRemoteKiroSyncSettings(
+      storeInstance.get('remoteKiroSyncSettings', DEFAULT_REMOTE_KIRO_SYNC_SETTINGS) as Partial<RemoteKiroSyncSettings>
+    )
+    console.log(
+      `[RemoteKiroSync] Loaded: ${remoteKiroSyncSettings.enabled ? 'enabled' : 'disabled'}, ` +
+        `${remoteKiroSyncSettings.targets.length} target(s)`
+    )
+  } catch (e) {
+    remoteKiroSyncSettings = DEFAULT_REMOTE_KIRO_SYNC_SETTINGS
+    console.warn('[RemoteKiroSync] Failed to load settings:', e)
+  }
+}
+
+async function syncCurrentKiroAuthToRemotes(reason: string): Promise<RemoteKiroSyncResult> {
+  if (!remoteKiroSyncSettings.enabled) {
+    return { success: true, skipped: true, reason: 'Remote SSH sync is disabled', results: [] }
+  }
+
+  try {
+    const result = await syncKiroAuthToRemotes(KIRO_AUTH_TOKEN_PATH, remoteKiroSyncSettings)
+    const succeeded = result.results.filter((item) => item.success).length
+    if (result.success) {
+      console.log(`[RemoteKiroSync] ${reason}: synced ${succeeded}/${result.results.length} target(s)`)
+    } else {
+      const failedTargets = result.results.filter((item) => !item.success).map((item) => item.target)
+      console.warn(`[RemoteKiroSync] ${reason}: failed target(s): ${failedTargets.join(', ') || result.reason}`)
+    }
+    mainWindow?.webContents.send('remote-kiro-sync-status', { reason, ...result })
+    return result
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    console.warn(`[RemoteKiroSync] ${reason}:`, message)
+    const result: RemoteKiroSyncResult = { success: false, reason: message, results: [] }
+    mainWindow?.webContents.send('remote-kiro-sync-status', { reason, ...result })
+    return result
+  }
+}
+
+async function writeKiroAuthTokenFileAndSync(
+  input: Parameters<typeof writeKiroAuthTokenFile>[0],
+  reason: string
+): ReturnType<typeof writeKiroAuthTokenFile> {
+  const result = await writeKiroAuthTokenFile(input)
+  await syncCurrentKiroAuthToRemotes(reason)
+  return result
 }
 
 // ============ Kiro IDE Auth Token 反向同步 ============
@@ -1493,6 +1551,7 @@ function startKiroAuthTokenWatcher(): void {
     lastSyncedFromIdeSignature = sig
     try {
       await syncIdeTokenChangeToStore(token)
+      await syncCurrentKiroAuthToRemotes('kiro-ide-refresh')
     } catch (e) {
       console.warn('[KiroAuthSync] syncIdeTokenChangeToStore failed:', e)
     }
@@ -1701,7 +1760,7 @@ async function runProactiveRenewal(accountId: string): Promise<void> {
 
   // 1. 写磁盘（同步给 IDE）
   try {
-    await writeKiroAuthTokenFile({
+    await writeKiroAuthTokenFileAndSync({
       accessToken: newAccess,
       refreshToken: newRefresh,
       expiresAtIso: new Date(newExpiresAt).toISOString(),
@@ -1712,7 +1771,7 @@ async function runProactiveRenewal(accountId: string): Promise<void> {
       clientId: creds.clientId || undefined,
       clientSecret: creds.clientSecret || undefined,
       profileArn: resolvedProfileArn
-    })
+    }, 'proactive-renewal')
     lastWrittenTokenSignature = `${newAccess}|${newRefresh}`
     lastSwitchedAccountId = accountId
   } catch (e) {
@@ -3027,7 +3086,7 @@ app.whenReady().then(async () => {
             provider,
             region
           })
-          await writeKiroAuthTokenFile({
+          await writeKiroAuthTokenFileAndSync({
             accessToken: newAccess,
             refreshToken: newRefresh,
             expiresAtIso: new Date(Date.now() + expiresIn * 1000).toISOString(),
@@ -3038,7 +3097,7 @@ app.whenReady().then(async () => {
             clientId: clientId || undefined,
             clientSecret: clientSecret || undefined,
             profileArn: resolvedProfileArn
-          })
+          }, 'manual-refresh')
           // 记录刚写入的签名，避免 watcher 触发反向同步回环
           lastWrittenTokenSignature = `${newAccess}|${newRefresh}`
           if (account.id) lastSwitchedAccountId = account.id
@@ -3159,6 +3218,102 @@ app.whenReady().then(async () => {
         error: error instanceof Error ? error.message : 'Unknown error'
       }
     }
+  })
+
+  ipcMain.handle('remote-kiro-sync:get-settings', async () => {
+    await initStore()
+    return { success: true, settings: remoteKiroSyncSettings }
+  })
+
+  ipcMain.handle('remote-kiro-sync:set-settings', async (_event, input: Partial<RemoteKiroSyncSettings>) => {
+    try {
+      const settings = normalizeRemoteKiroSyncSettings(input)
+      for (const target of settings.targets) {
+        const validationError = validateRemoteKiroTarget(target)
+        if (validationError) {
+          return { success: false, error: `${target}: ${validationError}` }
+        }
+      }
+      if (settings.enabled && settings.targets.length === 0) {
+        return { success: false, error: '请至少配置一个 Remote SSH 主机' }
+      }
+
+      await initStore()
+      remoteKiroSyncSettings = settings
+      store?.set('remoteKiroSyncSettings', settings)
+
+      // 多个 IDE 共用 rotating refresh token 时，必须由管理器提前续期并立即分发，
+      // 避免任一 IDE 先刷新导致其它机器手里的旧 token 失效。
+      if (settings.enabled && !proactiveRenewalEnabled) {
+        proactiveRenewalEnabled = true
+        store?.set('proactiveRenewalEnabled', true)
+      }
+
+      let syncResult: RemoteKiroSyncResult | undefined
+      if (settings.enabled) {
+        syncResult = await syncCurrentKiroAuthToRemotes('settings-enabled')
+
+        const diskToken = await readKiroAuthTokenFile()
+        const accountData = store?.get('accountData') as
+          | { accounts?: Record<string, { credentials?: { refreshToken?: string; expiresAt?: number } }> }
+          | null
+          | undefined
+        if (diskToken && accountData?.accounts) {
+          const match = Object.entries(accountData.accounts).find(
+            ([, account]) => account.credentials?.refreshToken === diskToken.refreshToken
+          )
+          if (match) {
+            lastSwitchedAccountId = match[0]
+            const expiresAt = Date.parse(diskToken.expiresAt)
+            if (Number.isFinite(expiresAt)) scheduleProactiveRenewal(match[0], expiresAt)
+          }
+        }
+      } else {
+        mainWindow?.webContents.send('remote-kiro-sync-status', {
+          reason: 'settings-disabled',
+          success: true,
+          skipped: true,
+          results: []
+        })
+      }
+
+      return {
+        success: true,
+        settings,
+        proactiveRenewalEnabled,
+        syncResult
+      }
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  })
+
+  ipcMain.handle('remote-kiro-sync:test', async (_event, targets: string[], connectTimeoutSeconds?: number) => {
+    try {
+      const settings = normalizeRemoteKiroSyncSettings({
+        enabled: true,
+        targets,
+        connectTimeoutSeconds
+      })
+      for (const target of settings.targets) {
+        const validationError = validateRemoteKiroTarget(target)
+        if (validationError) {
+          return { success: false, error: `${target}: ${validationError}`, results: [] }
+        }
+      }
+      if (settings.targets.length === 0) {
+        return { success: false, error: '请至少配置一个 Remote SSH 主机', results: [] }
+      }
+      const results = await testRemoteKiroTargets(settings.targets, settings.connectTimeoutSeconds)
+      return { success: results.every((result) => result.success), results }
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : String(error), results: [] }
+    }
+  })
+
+  ipcMain.handle('remote-kiro-sync:sync-now', async () => {
+    await initStore()
+    return syncCurrentKiroAuthToRemotes('manual-sync')
   })
 
   // IPC: 从 SSO Token 导入账号 (x-amz-sso_authn)
@@ -3703,7 +3858,7 @@ app.whenReady().then(async () => {
                       provider,
                       region
                     })
-                    await writeKiroAuthTokenFile({
+                    await writeKiroAuthTokenFileAndSync({
                       accessToken: newAccessToken,
                       refreshToken: newRefreshToken,
                       expiresAtIso: new Date(Date.now() + newExpiresIn * 1000).toISOString(),
@@ -3715,7 +3870,7 @@ app.whenReady().then(async () => {
                       clientId: clientId || undefined,
                       clientSecret: clientSecret || undefined,
                       profileArn: resolvedProfileArn
-                    })
+                    }, 'background-refresh')
                     lastWrittenTokenSignature = `${newAccessToken}|${newRefreshToken}`
                     if (account.id) lastSwitchedAccountId = account.id
                     console.log(`[BackgroundRefresh] Synced refreshed token to Kiro IDE for account ${account.id}`)
@@ -4801,7 +4956,7 @@ app.whenReady().then(async () => {
       // bug C 修复：用真实 expiresIn 算 expiresAt
       const expiresAtIso = new Date(Date.now() + finalExpiresIn * 1000).toISOString()
 
-      const { tokenPath, clientRegPath } = await writeKiroAuthTokenFile({
+      const { tokenPath, clientRegPath } = await writeKiroAuthTokenFileAndSync({
         accessToken: finalAccessToken,
         refreshToken: finalRefreshToken,
         expiresAtIso,
@@ -4812,7 +4967,7 @@ app.whenReady().then(async () => {
         clientId,
         clientSecret,
         profileArn: resolvedProfileArn
-      })
+      }, 'switch-account')
       console.log('[Switch Account] Token written to:', tokenPath)
       if (clientRegPath) {
         console.log('[Switch Account] Client registration written to:', clientRegPath)

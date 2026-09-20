@@ -49,6 +49,12 @@
 - 编辑 MCP 服务器配置
 - 管理用户规则（Steering 文件）
 
+### 🖥️ Remote SSH Token 同步
+- 本机 Token 轮换后自动同步到一个或多个 Kiro Remote SSH 主机
+- 同步 `kiro-auth-token.json` 及 IdC 客户端注册文件，并保持 `0600` 权限
+- 支持连接测试、立即同步和失败状态展示
+- 凭证仅通过 SSH 标准输入传输，不进入命令行参数或应用日志
+
 ### 🌐 多语言支持
 - 完整的中英文双语界面
 - 自动检测系统语言或手动选择
@@ -80,6 +86,17 @@
 - 统一任务中心（全局进度面板）
 - 一键诊断面板（网络/Kiro/AWS/邮箱/代理连通性）
 - 配置导入导出（含 AES-GCM 加密选项）
+
+---
+
+## 🖥️ Remote SSH Token 同步
+
+1. 为目标主机配置 SSH 密钥或 `ssh-agent`，确保 `ssh user@host` 不需要交互输入密码。
+2. 打开「设置 → Remote SSH Token 同步」，每行填写一个 `user@host` 或 `~/.ssh/config` 中的 Host 别名。
+3. 点击「测试连接」，成功后开启自动同步并点击「保存并同步」。
+4. 启用后会同时开启 IDE 主动续期，由账号管理器统一轮换 Token 并同步到全部目标主机。
+
+远程端需要 POSIX shell，以及 `base64` 或 OpenSSL。当前不支持 Windows 远程主机。SSH 私钥和密码不会由本应用读取或保存。
 
 ---
 
